@@ -109,7 +109,22 @@ impl Supergraph<Merged> {
     }
 
     pub fn assume_satisfiable(self) -> Supergraph<Satisfiable> {
-        todo!("unimplemented")
+        use crate::schema::ValidFederationSchema;
+        
+        // Convert Valid<Schema> to ValidFederationSchema
+        let federation_schema = ValidFederationSchema::new(self.state.schema)
+            .expect("Schema should be valid for federation");
+            
+        Supergraph {
+            state: Satisfiable {
+                schema: federation_schema,
+                metadata: SupergraphMetadata {
+                    interface_types_with_interface_objects: Default::default(),
+                    abstract_types_with_inconsistent_runtime_types: Default::default(),
+                },
+                hints: self.state.hints,
+            },
+        }
     }
 
     pub fn schema(&self) -> &Valid<Schema> {

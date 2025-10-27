@@ -344,19 +344,46 @@ impl Merger {
         let subgraph_def = &subgraph.schema.schema().schema_definition;
         self.merge_descriptions(&mut supergraph_def.description, &subgraph_def.description);
 
-        if subgraph_def.query.is_some() {
-            supergraph_def.query.clone_from(&subgraph_def.query);
-            // TODO mismatch on query types
+        // Handle query root type
+        if let Some(query_type) = &subgraph_def.query {
+            if let Some(existing_query) = &supergraph_def.query {
+                if existing_query != query_type {
+                    self.composition_hints.push(format!(
+                        "Query root type mismatch: existing '{}' vs new '{}' from subgraph '{}'. Using existing type.",
+                        existing_query, query_type, subgraph.name
+                    ));
+                }
+            } else {
+                supergraph_def.query.clone_from(&subgraph_def.query);
+            }
         }
-        if subgraph_def.mutation.is_some() {
-            supergraph_def.mutation.clone_from(&subgraph_def.mutation);
-            // TODO mismatch on mutation types
+        
+        // Handle mutation root type
+        if let Some(mutation_type) = &subgraph_def.mutation {
+            if let Some(existing_mutation) = &supergraph_def.mutation {
+                if existing_mutation != mutation_type {
+                    self.composition_hints.push(format!(
+                        "Mutation root type mismatch: existing '{}' vs new '{}' from subgraph '{}'. Using existing type.",
+                        existing_mutation, mutation_type, subgraph.name
+                    ));
+                }
+            } else {
+                supergraph_def.mutation.clone_from(&subgraph_def.mutation);
+            }
         }
-        if subgraph_def.subscription.is_some() {
-            supergraph_def
-                .subscription
-                .clone_from(&subgraph_def.subscription);
-            // TODO mismatch on subscription types
+        
+        // Handle subscription root type
+        if let Some(subscription_type) = &subgraph_def.subscription {
+            if let Some(existing_subscription) = &supergraph_def.subscription {
+                if existing_subscription != subscription_type {
+                    self.composition_hints.push(format!(
+                        "Subscription root type mismatch: existing '{}' vs new '{}' from subgraph '{}'. Using existing type.",
+                        existing_subscription, subscription_type, subgraph.name
+                    ));
+                }
+            } else {
+                supergraph_def.subscription.clone_from(&subgraph_def.subscription);
+            }
         }
     }
 
@@ -428,6 +455,7 @@ impl Merger {
         input_object_name: NamedType,
         input_object: &Node<InputObjectType>,
     ) {
+        let input_object_name_for_errors = input_object_name.clone();
         let existing_type = types
             .entry(input_object_name.clone())
             .or_insert(copy_input_object_type(input_object_name, input_object));
@@ -456,12 +484,29 @@ impl Merger {
                         directives: Default::default(),
                     })),
                     Occupied(i) => {
-                        i.into_mut()
-                        // merge_options(&i.get_mut().description, &field.description);
-                        // TODO check description
-                        // TODO check type
-                        // TODO check default value
-                        // TODO process directives
+                        let existing_field = i.into_mut();
+                        
+                        // Check and merge descriptions
+                        self.merge_descriptions(&mut existing_field.make_mut().description, &field.description);
+                        
+                        // Check type compatibility
+                        if existing_field.ty != field.ty {
+                            self.composition_hints.push(format!(
+                                "Input field '{}.{}' has different types: existing '{}' vs new '{}' from subgraph '{}'. Using existing type.",
+                                input_object_name_for_errors, field_name, existing_field.ty, field.ty, subgraph_name.0
+                            ));
+                        }
+                        
+                        // Check default value compatibility
+                        if existing_field.default_value != field.default_value {
+                            self.composition_hints.push(format!(
+                                "Input field '{}.{}' has different default values from subgraph '{}'. Using existing default.",
+                                input_object_name_for_errors, field_name, subgraph_name.0
+                            ));
+                        }
+                        
+                        // Process directives (already handled by add_inaccessible below)
+                        existing_field
                     }
                 };
 
@@ -485,7 +530,11 @@ impl Merger {
                     .push(Node::new(join_field_directive));
             }
         } else {
-            // TODO conflict on type
+            // Type kind conflict for input object
+            self.errors.push(format!(
+                "Type kind conflict for '{}': expected input object type but found different type in subgraph '{}'",
+                input_object_name_for_errors, subgraph_name.0
+            ));
         }
     }
 
@@ -497,6 +546,7 @@ impl Merger {
         interface_name: NamedType,
         interface: &Node<InterfaceType>,
     ) {
+        let interface_name_for_errors = interface_name.clone();
         let existing_type = types
             .entry(interface_name.clone())
             .or_insert(copy_interface_type(interface_name, interface));
@@ -529,14 +579,28 @@ impl Merger {
                 let existing_field = mutable_intf.fields.entry(field_name.clone());
                 let supergraph_field = match existing_field {
                     Occupied(f) => {
-                        f.into_mut()
-                        // TODO check description
-                        // TODO check type
-                        // TODO check default value
-                        // TODO process directives
+                        let existing_field = f.into_mut();
+                        
+                        // Check and merge descriptions (already handled by merge_descriptions below)
+                        
+                        // Check type compatibility
+                        if existing_field.ty != field.ty {
+                            self.composition_hints.push(format!(
+                                "Interface field '{}.{}' has different types: existing '{}' vs new '{}' from subgraph '{}'. Using existing type.",
+                                interface_name_for_errors, field_name, existing_field.ty, field.ty, subgraph_name.0
+                            ));
+                        }
+                        
+                        // Note: Interface fields don't have default values like input fields
+                        // Process directives (handled by add_inaccessible below)
+                        existing_field
                     }
                     Vacant(f) => {
-                        // TODO warning mismatch missing fields
+                        // Warn about missing fields in some subgraphs
+                        self.composition_hints.push(format!(
+                            "Interface field '{}.{}' is missing in some subgraphs but present in subgraph '{}'. Adding field to supergraph.",
+                            interface_name_for_errors, field_name, subgraph_name.0
+                        ));
                         f.insert(Component::new(FieldDefinition {
                             name: field.name.clone(),
                             description: field.description.clone(),
@@ -579,7 +643,11 @@ impl Merger {
                     .push(Node::new(join_field_directive));
             }
         } else {
-            // TODO conflict on type
+            // Type kind conflict for interface
+            self.errors.push(format!(
+                "Type kind conflict for '{}': expected interface type but found different type in subgraph '{}'",
+                interface_name_for_errors, subgraph_name.0
+            ));
         }
     }
 
